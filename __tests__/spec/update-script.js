@@ -1,10 +1,11 @@
 /* eslint-env jest */
 const child_process = require('child_process') // eslint-disable-line camelcase
 const fs = require('fs')
-const os = require('os')
 const path = require('path')
 const process = require('process')
 const request = require('superagent')
+
+const utils = require('./utils')
 
 /*
  * Constants
@@ -12,12 +13,6 @@ const request = require('superagent')
 
 const repoDir = path.resolve(__dirname, '..', '..')
 const script = path.join(repoDir, 'update.sh')
-
-const headReleaseVersion = child_process.execSync(
-  'git rev-parse HEAD', { encoding: 'utf8' }
-).trim()
-const headReleaseBasename = `govuk-prototype-kit-${headReleaseVersion}`
-const headReleaseArchiveFilename = `${headReleaseBasename}.zip`
 
 // When running tests using Windows GitHub runner, make sure to use gitbash.
 // Path is from https://github.com/actions/virtual-environments/blob/win19/20211110.1/images/win/Windows2019-Readme.md
@@ -106,7 +101,7 @@ describe('update.sh', () => {
   const _cwd = process.cwd()
 
   // Following tests will run in a temporary directory, to avoid messing up the project
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'jest-'))
+  const tmpDir = utils.mkdtempSync()
   const fixtureDir = path.resolve(tmpDir, '__fixtures__')
 
   /*
@@ -159,15 +154,12 @@ describe('update.sh', () => {
 
   function _mktestPrototypeSync (src) {
     // Create a release archive from the HEAD we are running tests in
-    child_process.execSync(
-      `git archive --prefix=${headReleaseBasename}/ --output=${fixtureDir}/${headReleaseArchiveFilename} HEAD`,
-      { cwd: repoDir }
-    )
+    const archivePath = utils.mkReleaseArchiveSync()
+    const releaseDir = path.parse(archivePath).name
+
+    utils.mkPrototypeSync(src)
 
     // Create a git repo from the new release archive so we can see changes.
-    child_process.execSync(`unzip -q ${headReleaseArchiveFilename}`, { cwd: fixtureDir })
-    child_process.execSync(`mv ${headReleaseBasename} ${src}`, { cwd: fixtureDir })
-
     child_process.execFileSync('git', ['init'], { cwd: src })
     child_process.execFileSync('git', ['config', 'user.email', 'test@example.com'], { cwd: src })
     child_process.execFileSync('git', ['config', 'user.name', 'Jest Tests'], { cwd: src })
@@ -186,9 +178,9 @@ describe('update.sh', () => {
     child_process.execFileSync('git', ['commit', '-m', 'Test', '-a'], { cwd: src })
 
     // populate the update folder to speed up tests
-    child_process.execSync(`unzip -q ${fixtureDir}/${headReleaseArchiveFilename}`, { cwd: src })
-    child_process.execSync(`mv ${headReleaseBasename} update`, { cwd: src })
-    fs.copyFileSync(path.join(fixtureDir, headReleaseArchiveFilename), path.join(src, 'update', headReleaseArchiveFilename))
+    child_process.execSync(`unzip -q ${archivePath}`, { cwd: src })
+    child_process.execSync(`mv ${releaseDir} update`, { cwd: src })
+    fs.copyFileSync(archivePath, path.join(src, 'update', path.basename(archivePath)))
   }
 
   function mktestPrototypeSync (dest) {
@@ -368,12 +360,12 @@ describe('update.sh', () => {
       expect(newStat.mtimeMs).toBe(oldStat.mtimeMs)
     })
 
-    it('removes files that have been removed from docs, gulp and lib folders', () => {
+    it('removes files that have been removed from docs, build and lib folders', () => {
       const testDir = mktestPrototypeSync('remove-dangling-files')
 
       const updateDir = path.join(testDir, 'update')
+      fs.unlinkSync(path.join(updateDir, 'lib', 'build', 'config.json'))
       fs.unlinkSync(path.join(updateDir, 'docs', 'documentation', 'session.md'))
-      fs.unlinkSync(path.join(updateDir, 'gulp', 'clean.js'))
       fs.unlinkSync(path.join(updateDir, 'lib', 'v6', 'govuk_template_unbranded.html'))
       fs.rmdirSync(path.join(updateDir, 'lib', 'v6'))
 
@@ -381,8 +373,27 @@ describe('update.sh', () => {
 
       expect(execGitStatusSync(testDir)).toEqual([
         ' D docs/documentation/session.md',
-        ' D gulp/clean.js',
+        ' D lib/build/config.json',
         ' D lib/v6/govuk_template_unbranded.html'
+      ])
+    })
+
+    it('removes gulp files and adds build files if the release does not contain gulp', () => {
+      const testDir = mktestPrototypeSync('remove-gulp-files')
+
+      fs.mkdirSync(path.join(testDir, 'gulp'))
+      fs.writeFileSync(path.join(testDir, 'gulp', 'watch.js'), 'foo')
+      fs.writeFileSync(path.join(testDir, 'gulpfile.js'), 'bar')
+      child_process.execSync('git add gulp/watch.js gulpfile.js', { cwd: testDir })
+      child_process.execSync('git rm -r lib/build', { cwd: testDir })
+      child_process.execSync('git commit -q -m "Ensure gulp files exist"', { cwd: testDir })
+
+      runScriptSyncAndExpectSuccess('copy', { testDir })
+
+      expect(execGitStatusSync(testDir)).toEqual([
+        ' D gulp/watch.js',
+        ' D gulpfile.js',
+        '?? lib/build/'
       ])
     })
 
